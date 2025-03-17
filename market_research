@@ -1,0 +1,87 @@
+import os
+import time  # Import time to add delay
+from flask import Flask, request, render_template
+import pandas as pd
+import matplotlib.pyplot as plt
+from pytrends.request import TrendReq  # Google Trends API
+
+import matplotlib
+matplotlib.use('Agg')
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return render_template("index.html")
+
+@app.route('/market_research', methods=['POST'])
+def market_research():
+    if 'file' not in request.files:
+        return "No file uploaded", 400
+
+    file = request.files['file']
+    
+    try:
+        df = pd.read_csv(file)
+    except Exception as e:
+        return f"Error reading file: {str(e)}", 400
+
+    if 'keyword' not in df.columns:
+        return "CSV must contain a 'keyword' column", 400
+
+    keyword = df['keyword'][0]  # Take the first keyword for analysis
+    pytrends = TrendReq()
+
+    def fetch_trend_data(timeframe):
+        """Fetch trend data with retries to avoid 429 errors"""
+        attempts = 3  # Retry up to 3 times
+        for attempt in range(attempts):
+            try:
+                pytrends.build_payload([keyword], cat=0, timeframe=timeframe, geo='US', gprop='')
+                df_trend = pytrends.interest_over_time()
+
+                if df_trend.empty:
+                    return None
+
+                return df_trend
+            except Exception as e:
+                print(f"Attempt {attempt + 1} failed: {e}")
+                time.sleep(10)  # Wait 10 seconds before retrying
+
+        return None
+
+    # Fetch data with rate limits
+    df_daily = fetch_trend_data('now 7-d')
+    time.sleep(5)  # Wait before the next request
+    df_monthly = fetch_trend_data('today 3-m')
+    time.sleep(5)  
+    df_yearly = fetch_trend_data('today 5-y')
+
+    if not df_daily and not df_monthly and not df_yearly:
+        return "No trend data available due to Google rate limits or no data found.", 400
+
+    # Function to save the graph
+    def save_graph(df_trend, filename, title, color):
+        if df_trend is not None:
+            plt.figure(figsize=(10, 5))
+            plt.plot(df_trend.index, df_trend[keyword], marker="o", linestyle="dashed", color=color, label=title)
+            plt.xlabel("Date")
+            plt.ylabel("Interest Level")
+            plt.title(title)
+            plt.legend()
+            plt.savefig(f'static/{filename}')
+            plt.close()
+            return f"/static/{filename}"
+        return None
+
+    daily_image_url = save_graph(df_daily, "market_research_daily.png", "Daily Trend", "blue")
+    monthly_image_url = save_graph(df_monthly, "market_research_monthly.png", "Monthly Trend", "green")
+    yearly_image_url = save_graph(df_yearly, "market_research_yearly.png", "Yearly Trend", "red")
+
+    return render_template("market_research_result.html",
+                           daily_image_url=daily_image_url,
+                           monthly_image_url=monthly_image_url,
+                           yearly_image_url=yearly_image_url)
+
+if __name__ == '__main__':
+    app.run(debug=True)
